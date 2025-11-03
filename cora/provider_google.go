@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 
 	"google.golang.org/genai"
@@ -36,7 +35,7 @@ func (p *googleProvider) Text(ctx context.Context, plan callPlan) (callResult, e
 		return p.proofread(ctx, plan)
 	}
 
-	contents := genai.Text(plan.Input)
+	// --- Common Config Setup ---
 	cfg := &genai.GenerateContentConfig{}
 	if strings.TrimSpace(plan.System) != "" {
 		cfg.SystemInstruction = &genai.Content{
@@ -59,64 +58,40 @@ func (p *googleProvider) Text(ctx context.Context, plan callPlan) (callResult, e
 		cfg.ResponseJsonSchema = plan.ResponseSchema
 	}
 
-	// Tool calling
-	if len(plan.Tools) > 0 {
+	// --- Tool Calling Path: Delegate to executeToolLoop ---
+	// Check if this is a tool-calling request
+	if len(plan.Tools) > 0 && len(plan.ToolHandlers) > 0 {
+		// Configure tools for the loop
 		cfg.Tools = toGenAITools(plan.Tools)
 		cfg.ToolConfig = &genai.ToolConfig{
 			FunctionCallingConfig: &genai.FunctionCallingConfig{
 				Mode: genai.FunctionCallingConfigModeAny,
 			},
 		}
+
+		// Build the initial history for the tool loop.
+		// It must be in the []*genai.Content format.
+		initialHistory := []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: plan.Input}}},
+		}
+
+		// DELEGATE TO THE TOOL LOOP
+		cr, err := p.executeToolLoop(ctx, plan.Model, initialHistory, cfg, plan)
+		if err != nil {
+			return callResult{}, err
+		}
+		cr.toolLoop = true // Mark that the loop was used
+		return cr, nil
 	}
 
+	// --- Original Path (No Tools) ---
+	// If not tool calling, proceed with the simple GenerateContent call.
+	contents := genai.Text(plan.Input)
 	res, err := p.client.Models.GenerateContent(ctx, plan.Model, contents, cfg)
 	if err != nil {
 		return callResult{}, err
 	}
 	cr := toCallResultFromGenAI(res)
-
-	// Handle a single round of tool calls if requested and handlers provided.
-	if len(plan.Tools) > 0 && len(plan.ToolHandlers) > 0 {
-		fcs := res.FunctionCalls()
-		if len(fcs) > 0 {
-			// Execute each function call and send back as FunctionResponse parts.
-			respContent := &genai.Content{Role: "user"} // role is not strictly enforced here
-			for _, fc := range fcs {
-				h, ok := plan.ToolHandlers[fc.Name]
-				if !ok {
-					return callResult{}, fmt.Errorf("cora: no handler for tool %q", fc.Name)
-				}
-				result, err := h(ctx, fc.Args) // Args is already a map[string]any in genai
-				if err != nil {
-					return callResult{}, fmt.Errorf("cora: tool %q failed: %w", fc.Name, err)
-				}
-				// Ensure JSON-serializable map
-				payload, err := normalizeJSON(result)
-				if err != nil {
-					return callResult{}, fmt.Errorf("cora: tool %q result not JSON-serializable: %w", fc.Name, err)
-				}
-				respContent.Parts = append(respContent.Parts, &genai.Part{
-					FunctionResponse: &genai.FunctionResponse{
-						Name:     fc.Name,
-						Response: payload,
-					},
-				})
-			}
-			// Follow-up call with full history: [user input, model function call, function response]
-			// Google requires function response to immediately follow function call
-			history := []*genai.Content{
-				{Role: "user", Parts: []*genai.Part{{Text: plan.Input}}},
-				res.Candidates[0].Content, // model's response with function call
-				respContent,               // function response
-			}
-			res2, err := p.client.Models.GenerateContent(ctx, plan.Model, history, cfg)
-			if err != nil {
-				return callResult{}, err
-			}
-			cr = toCallResultFromGenAI(res2)
-			cr.toolLoop = true
-		}
-	}
 
 	return cr, nil
 }

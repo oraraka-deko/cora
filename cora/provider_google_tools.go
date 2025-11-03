@@ -12,7 +12,8 @@ func (p *googleProvider) executeToolLoop(ctx context.Context, model string, cont
 	executor := NewToolExecutor(plan.ToolHandlers).
 		WithMaxRounds(5).
 		WithParallel(false).
-		WithStopOnError(true)
+		WithStopOnError(true).
+		WithValidator(plan.Tools)
 
 	roundCount := 0
 
