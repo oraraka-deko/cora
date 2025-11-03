@@ -9,10 +9,37 @@ import (
 
 // executeToolLoop handles multi-round tool calling for Google.
 func (p *googleProvider) executeToolLoop(ctx context.Context, model string, contents any, cfg *genai.GenerateContentConfig, plan callPlan) (callResult, error) {
+	// Configure executor with plan settings or defaults
+	maxRounds := 5
+	if plan.MaxToolRounds != nil {
+		maxRounds = *plan.MaxToolRounds
+	}
+
+	parallelTools := false
+	if plan.ParallelTools != nil {
+		parallelTools = *plan.ParallelTools
+	}
+
+	stopOnError := true
+	if plan.StopOnToolError != nil {
+		stopOnError = *plan.StopOnToolError
+	}
+
 	executor := NewToolExecutor(plan.ToolHandlers).
-		WithMaxRounds(5).
-		WithParallel(false).
-		WithStopOnError(true)
+		WithMaxRounds(maxRounds).
+		WithParallel(parallelTools).
+		WithStopOnError(stopOnError).
+		WithValidator(plan.Tools)
+
+	// Apply cache if configured
+	if plan.ToolCacheTTL > 0 && plan.ToolCacheMaxSize > 0 {
+		executor = executor.WithCache(plan.ToolCacheTTL, plan.ToolCacheMaxSize)
+	}
+
+	// Apply retry if configured
+	if plan.ToolRetryConfig != nil {
+		executor = executor.WithRetry(*plan.ToolRetryConfig)
+	}
 
 	roundCount := 0
 

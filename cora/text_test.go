@@ -153,11 +153,12 @@ func TestText_ToolCalling_Mode(t *testing.T) {
 }
 
 func TestBuildPlans_Errors(t *testing.T) {
-	_, err := buildPlans(ProviderOpenAI, "gpt", TextRequest{Mode: ModeStructuredJSON})
+	cfg := CoraConfig{}
+	_, err := buildPlans(ProviderOpenAI, "gpt", TextRequest{Mode: ModeStructuredJSON}, cfg)
 	if err == nil {
 		t.Fatal("expected error for missing ResponseSchema")
 	}
-	_, err = buildPlans(ProviderOpenAI, "gpt", TextRequest{Mode: ModeToolCalling})
+	_, err = buildPlans(ProviderOpenAI, "gpt", TextRequest{Mode: ModeToolCalling}, cfg)
 	if err == nil {
 		t.Fatal("expected error for missing Tools")
 	}

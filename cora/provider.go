@@ -1,6 +1,9 @@
 package cora
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // providerClient is the internal interface each backend implements.
 type providerClient interface {
@@ -29,6 +32,16 @@ type callPlan struct {
 	// Tool calling
 	Tools        []CoraTool
 	ToolHandlers map[string]CoraToolHandler
+
+	// Tool execution configuration
+	MaxToolRounds   *int
+	ParallelTools   *bool
+	StopOnToolError *bool
+
+	// Client-level tool configuration (from CoraConfig)
+	ToolCacheTTL     time.Duration
+	ToolCacheMaxSize int
+	ToolRetryConfig  *RetryConfig
 
 	// Two-step specific flag to apply proofreading prompt for this call
 	Proofread bool

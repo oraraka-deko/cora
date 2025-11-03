@@ -61,7 +61,7 @@ func (c *Client) Text(ctx context.Context, req TextRequest) (TextResponse, error
 	}
 
 	// 1) Build call plans based on Mode.
-	plans, err := buildPlans(req.Provider, model, req)
+	plans, err := buildPlans(req.Provider, model, req, c.cfg)
 	if err != nil {
 		return TextResponse{}, err
 	}
@@ -124,15 +124,18 @@ func (c *Client) ensureProvider(p Provider) (providerClient, error) {
 }
 
 // buildPlans converts a TextRequest + Mode into one or more call plans.
-func buildPlans(provider Provider, model string, req TextRequest) ([]callPlan, error) {
+func buildPlans(provider Provider, model string, req TextRequest, cfg CoraConfig) ([]callPlan, error) {
 	base := callPlan{
-		Provider:        provider,
-		Model:           model,
-		System:          req.System,
-		Input:           req.Input,
-		Temperature:     req.Temperature,
-		MaxOutputTokens: req.MaxOutputTokens,
-		Labels:          req.Labels,
+		Provider:         provider,
+		Model:            model,
+		System:           req.System,
+		Input:            req.Input,
+		Temperature:      req.Temperature,
+		MaxOutputTokens:  req.MaxOutputTokens,
+		Labels:           req.Labels,
+		ToolCacheTTL:     cfg.ToolCacheTTL,
+		ToolCacheMaxSize: cfg.ToolCacheMaxSize,
+		ToolRetryConfig:  cfg.ToolRetryConfig,
 	}
 
 	switch req.Mode {
@@ -153,6 +156,9 @@ func buildPlans(provider Provider, model string, req TextRequest) ([]callPlan, e
 		}
 		base.Tools = req.Tools
 		base.ToolHandlers = req.ToolHandlers
+		base.MaxToolRounds = req.MaxToolRounds
+		base.ParallelTools = req.ParallelTools
+		base.StopOnToolError = req.StopOnToolError
 		return []callPlan{base}, nil
 
 	case ModeTwoStepEnhance:
