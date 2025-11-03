@@ -16,7 +16,7 @@ func TestBenchmark_Google_Gemini(t *testing.T) {
 	}
 
 	cfg := CoraConfig{
-		GoogleAPIKey:       "AIzaSyDD6qw4oiAVqKPq9uLG20SkxpaB8N-Hve0",
+		GoogleAPIKey:       "",
 		DefaultModelGoogle: "gemini-2.5-flash",
 	}
 
@@ -63,7 +63,7 @@ func TestBenchmark_Google_WithSystemPrompt(t *testing.T) {
 	}
 
 	cfg := CoraConfig{
-		GoogleAPIKey: "AIzaSyDD6qw4oiAVqKPq9uLG20SkxpaB8N-Hve0",
+		GoogleAPIKey: "",
 	}
 
 	client := New(cfg)
@@ -97,7 +97,7 @@ func TestBenchmark_Google_StructuredJSON(t *testing.T) {
 	}
 
 	cfg := CoraConfig{
-		GoogleAPIKey: "AIzaSyDD6qw4oiAVqKPq9uLG20SkxpaB8N-Hve0",
+		GoogleAPIKey: "",
 	}
 
 	client := New(cfg)
@@ -153,7 +153,7 @@ func TestBenchmark_Parallel_BothProviders(t *testing.T) {
 	})
 
 	googleClient := New(CoraConfig{
-		GoogleAPIKey: "AIzaSyDD6qw4oiAVqKPq9uLG20SkxpaB8N-Hve0",
+		GoogleAPIKey: "",
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -258,7 +258,7 @@ func TestBenchmark_MultipleRequests_Performance(t *testing.T) {
 		{
 			name: "Google",
 			client: New(CoraConfig{
-				GoogleAPIKey: "AIzaSyDD6qw4oiAVqKPq9uLG20SkxpaB8N-Hve0",
+				GoogleAPIKey: "",
 			}),
 			provider: ProviderGoogle,
 			model:    "gemini-2.5-flash",
@@ -428,7 +428,7 @@ func TestBenchmark_ToolCalling_Google(t *testing.T) {
 	}
 
 	cfg := CoraConfig{
-		GoogleAPIKey: "AIzaSyDD6qw4oiAVqKPq9uLG20SkxpaB8N-Hve0",
+		GoogleAPIKey: "",
 	}
 
 	client := New(cfg)
@@ -543,7 +543,7 @@ func TestBenchmark_ComparisonReport(t *testing.T) {
 		{
 			name: "Google Gemini",
 			client: New(CoraConfig{
-				GoogleAPIKey: "AIzaSyDD6qw4oiAVqKPq9uLG20SkxpaB8N-Hve0",
+				GoogleAPIKey: "",
 			}),
 			provider: ProviderGoogle,
 			model:    "gemini-2.5-flash",
