@@ -102,8 +102,14 @@ func (p *googleProvider) Text(ctx context.Context, plan callPlan) (callResult, e
 					},
 				})
 			}
-			// Follow-up call
-			res2, err := p.client.Models.GenerateContent(ctx, plan.Model, []*genai.Content{respContent}, &genai.GenerateContentConfig{})
+			// Follow-up call with full history: [user input, model function call, function response]
+			// Google requires function response to immediately follow function call
+			history := []*genai.Content{
+				{Role: "user", Parts: []*genai.Part{{Text: plan.Input}}},
+				res.Candidates[0].Content, // model's response with function call
+				respContent,               // function response
+			}
+			res2, err := p.client.Models.GenerateContent(ctx, plan.Model, history, cfg)
 			if err != nil {
 				return callResult{}, err
 			}

@@ -66,7 +66,8 @@ func (p *googleProvider) executeToolLoop(ctx context.Context, model string, cont
 			})
 		}
 
-		// Continue with function response
-		currentContents = []*genai.Content{respContent}
+		// Append model response and function response to history
+		// Google requires: [previous messages, model's function call, user's function response]
+		currentContents = append(currentContents, res.Candidates[0].Content, respContent)
 	}
 }

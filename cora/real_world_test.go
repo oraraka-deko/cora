@@ -15,7 +15,7 @@ func TestRealWorld_XAI_BasicChat(t *testing.T) {
 	cfg := CoraConfig{
 		OpenAIAPIKey:       "",
 		OpenAIBaseURL:      "https://api.x.ai/v1",
-		DefaultModelOpenAI: "grok-3",
+		DefaultModelOpenAI: "grok-4-fast-reasoning",
 	}
 
 	client := New(cfg)
@@ -28,7 +28,7 @@ func TestRealWorld_XAI_BasicChat(t *testing.T) {
 
 	resp, err := client.Text(ctx, TextRequest{
 		Provider: ProviderOpenAI,
-		Model:    "grok-3",
+		Model:    "grok-4-fast-reasoning",
 		Input:    "Say hello in exactly 5 words.",
 		Mode:     ModeBasic,
 	})
@@ -75,7 +75,7 @@ func TestRealWorld_XAI_WithTemperature(t *testing.T) {
 
 	resp, err := client.Text(ctx, TextRequest{
 		Provider:        ProviderOpenAI,
-		Model:           "grok-3",
+		Model:           "grok-4-fast-reasoning",
 		Input:           "Explain quantum computing in one sentence.",
 		Mode:            ModeBasic,
 		Temperature:     &temp,
@@ -111,7 +111,7 @@ func TestRealWorld_XAI_WithSystemPrompt(t *testing.T) {
 
 	resp, err := client.Text(ctx, TextRequest{
 		Provider: ProviderOpenAI,
-		Model:    "grok-3",
+		Model:    "grok-4-fast-reasoning",
 		System:   "You are a helpful assistant that speaks like a pirate. Keep responses brief.",
 		Input:    "What is 2+2?",
 		Mode:     ModeBasic,
@@ -165,7 +165,7 @@ func TestRealWorld_XAI_StructuredJSON(t *testing.T) {
 
 	resp, err := client.Text(ctx, TextRequest{
 		Provider:       ProviderOpenAI,
-		Model:          "grok-3",
+		Model:          "grok-4-fast-reasoning",
 		Input:          "Generate a fictional person: John who is 30 years old and lives in New York",
 		Mode:           ModeStructuredJSON,
 		ResponseSchema: schema,
@@ -226,7 +226,7 @@ func TestRealWorld_XAI_MultipleRequests(t *testing.T) {
 	for i, question := range questions {
 		resp, err := client.Text(ctx, TextRequest{
 			Provider: ProviderOpenAI,
-			Model:    "grok-3",
+			Model:    "grok-4-fast-reasoning",
 			Input:    question,
 			Mode:     ModeBasic,
 		})

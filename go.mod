@@ -1,4 +1,4 @@
-module github.com/oraraka-deko/cora/cora
+module github.com/oraraka-deko/cora
 
 go 1.25.3
 
@@ -25,3 +25,5 @@ require (
 	google.golang.org/grpc v1.66.2 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 )
+
+replace github.com/oraraka-deko/cora => ./
