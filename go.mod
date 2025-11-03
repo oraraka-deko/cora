@@ -1,4 +1,4 @@
-module cora
+module github.com/oraraka-deko/cora/cora
 
 go 1.25.3
 

@@ -3,21 +3,31 @@ package cora
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // ToolExecutor handles tool call execution with configurable behavior.
 type ToolExecutor struct {
 	handlers    map[string]CoraToolHandler
-	maxRounds   int  // Maximum tool call rounds (prevents infinite loops)
-	parallel    bool // Execute multiple tool calls in parallel
-	stopOnError bool // Stop execution on first error
+	maxRounds   int
+	parallel    bool
+	stopOnError bool
+	cache       *ToolCache
+	validator   *ToolValidator
+	retryConfig *RetryConfig
+	
+	// Metrics
+	totalCalls      int
+	successfulCalls int
+	failedCalls     int
+	cachedCalls     int
 }
 
 // NewToolExecutor creates a tool executor with default settings.
 func NewToolExecutor(handlers map[string]CoraToolHandler) *ToolExecutor {
 	return &ToolExecutor{
 		handlers:    handlers,
-		maxRounds:   5, // Default max rounds
+		maxRounds:   5,
 		parallel:    false,
 		stopOnError: true,
 	}
@@ -41,11 +51,35 @@ func (te *ToolExecutor) WithStopOnError(stop bool) *ToolExecutor {
 	return te
 }
 
+// WithCache enables result caching with the specified TTL and max size.
+func (te *ToolExecutor) WithCache(ttl time.Duration, maxSize int) *ToolExecutor {
+	te.cache = NewToolCache(ttl, maxSize)
+	return te
+}
+
+// WithValidator enables argument validation using tool schemas.
+func (te *ToolExecutor) WithValidator(tools []CoraTool) *ToolExecutor {
+	te.validator = NewToolValidator(tools)
+	return te
+}
+
+// WithRetry enables retry logic for tool execution.
+func (te *ToolExecutor) WithRetry(config RetryConfig) *ToolExecutor {
+	te.retryConfig = &config
+	
+	// Wrap all handlers with retry logic
+	for name, handler := range te.handlers {
+		te.handlers[name] = RetryableToolHandler(handler, config)
+	}
+	return te
+}
+
 // toolCallResult holds the result of a single tool invocation.
 type toolCallResult struct {
 	name   string
 	result any
 	err    error
+	cached bool
 }
 
 // executeBatch runs multiple tool calls, respecting parallel/serial execution mode.
@@ -53,6 +87,9 @@ func (te *ToolExecutor) executeBatch(ctx context.Context, calls []toolCallReques
 	if len(calls) == 0 {
 		return nil, nil
 	}
+
+	// Update metrics
+	te.totalCalls += len(calls)
 
 	if te.parallel {
 		return te.executeParallel(ctx, calls)
@@ -69,21 +106,16 @@ func (te *ToolExecutor) executeSerial(ctx context.Context, calls []toolCallReque
 	results := make([]toolCallResult, len(calls))
 
 	for i, call := range calls {
-		handler, ok := te.handlers[call.name]
-		if !ok {
-			err := fmt.Errorf("no handler for tool %q", call.name)
-			results[i] = toolCallResult{name: call.name, err: err}
+		result, err := te.executeSingleCall(ctx, call)
+		results[i] = result
+
+		if err != nil {
+			te.failedCalls++
 			if te.stopOnError {
-				return results, err
+				return results, fmt.Errorf("tool %q failed: %w", call.name, err)
 			}
-			continue
-		}
-
-		result, err := handler(ctx, call.args)
-		results[i] = toolCallResult{name: call.name, result: result, err: err}
-
-		if err != nil && te.stopOnError {
-			return results, fmt.Errorf("tool %q failed: %w", call.name, err)
+		} else {
+			te.successfulCalls++
 		}
 	}
 
@@ -96,21 +128,16 @@ func (te *ToolExecutor) executeParallel(ctx context.Context, calls []toolCallReq
 	doneChan := make(chan struct{}, len(calls))
 
 	for i, call := range calls {
-		i, call := i, call // capture loop variables
+		i, call := i, call
 		go func() {
-			handler, ok := te.handlers[call.name]
-			if !ok {
-				err := fmt.Errorf("no handler for tool %q", call.name)
-				results[i] = toolCallResult{name: call.name, err: err}
-				errChan <- err
-				doneChan <- struct{}{}
-				return
-			}
-
-			result, err := handler(ctx, call.args)
-			results[i] = toolCallResult{name: call.name, result: result, err: err}
+			result, err := te.executeSingleCall(ctx, call)
+			results[i] = result
+			
 			if err != nil {
+				te.failedCalls++
 				errChan <- fmt.Errorf("tool %q failed: %w", call.name, err)
+			} else {
+				te.successfulCalls++
 			}
 			doneChan <- struct{}{}
 		}()
@@ -122,7 +149,6 @@ func (te *ToolExecutor) executeParallel(ctx context.Context, calls []toolCallReq
 	}
 	close(errChan)
 
-	// Check for errors
 	if te.stopOnError {
 		for err := range errChan {
 			return results, err
@@ -130,4 +156,73 @@ func (te *ToolExecutor) executeParallel(ctx context.Context, calls []toolCallReq
 	}
 
 	return results, nil
+}
+
+func (te *ToolExecutor) executeSingleCall(ctx context.Context, call toolCallRequest) (toolCallResult, error) {
+	// 1. Validate arguments if validator is configured
+	if te.validator != nil {
+		if err := te.validator.ValidateCall(call.name, call.args); err != nil {
+			return toolCallResult{name: call.name, err: err}, err
+		}
+	}
+
+	// 2. Check cache if enabled
+	if te.cache != nil {
+		if result, err, found := te.cache.Get(call.name, call.args); found {
+			te.cachedCalls++
+			return toolCallResult{name: call.name, result: result, err: err, cached: true}, err
+		}
+	}
+
+	// 3. Execute handler
+	handler, ok := te.handlers[call.name]
+	if !ok {
+		err := fmt.Errorf("no handler for tool %q", call.name)
+		return toolCallResult{name: call.name, err: err}, err
+	}
+
+	result, err := handler(ctx, call.args)
+
+	// 4. Store in cache if enabled
+	if te.cache != nil {
+		te.cache.Set(call.name, call.args, result, err)
+	}
+
+	return toolCallResult{name: call.name, result: result, err: err}, err
+}
+
+// Metrics returns execution statistics.
+func (te *ToolExecutor) Metrics() ToolExecutorMetrics {
+	metrics := ToolExecutorMetrics{
+		TotalCalls:      te.totalCalls,
+		SuccessfulCalls: te.successfulCalls,
+		FailedCalls:     te.failedCalls,
+		CachedCalls:     te.cachedCalls,
+	}
+
+	if te.cache != nil {
+		hits, misses := te.cache.Stats()
+		metrics.CacheHits = int(hits)
+		metrics.CacheMisses = int(misses)
+		if hits+misses > 0 {
+			metrics.CacheHitRate = float64(hits) / float64(hits+misses)
+		}
+	}
+
+	if metrics.TotalCalls > 0 {
+		metrics.SuccessRate = float64(metrics.SuccessfulCalls) / float64(metrics.TotalCalls)
+	}
+
+	return metrics
+}
+
+type ToolExecutorMetrics struct {
+	TotalCalls      int
+	SuccessfulCalls int
+	FailedCalls     int
+	CachedCalls     int
+	CacheHits       int
+	CacheMisses     int
+	CacheHitRate    float64
+	SuccessRate     float64
 }
