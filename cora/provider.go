@@ -30,6 +30,11 @@ type callPlan struct {
 	Tools        []CoraTool
 	ToolHandlers map[string]CoraToolHandler
 
+	// Tool execution configuration
+	MaxToolRounds   *int
+	ParallelTools   *bool
+	StopOnToolError *bool
+
 	// Two-step specific flag to apply proofreading prompt for this call
 	Proofread bool
 }

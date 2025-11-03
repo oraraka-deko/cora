@@ -153,6 +153,9 @@ func buildPlans(provider Provider, model string, req TextRequest) ([]callPlan, e
 		}
 		base.Tools = req.Tools
 		base.ToolHandlers = req.ToolHandlers
+		base.MaxToolRounds = req.MaxToolRounds
+		base.ParallelTools = req.ParallelTools
+		base.StopOnToolError = req.StopOnToolError
 		return []callPlan{base}, nil
 
 	case ModeTwoStepEnhance:

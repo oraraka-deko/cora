@@ -68,6 +68,11 @@ type TextRequest struct {
 	Tools        []CoraTool
 	ToolHandlers map[string]CoraToolHandler
 
+	// Tool execution configuration (optional, used with ModeToolCalling).
+	MaxToolRounds  *int  // Maximum number of tool call rounds (default: 5)
+	ParallelTools  *bool // Execute multiple tool calls in parallel (default: false)
+	StopOnToolError *bool // Stop execution on first tool error (default: true)
+
 	// Arbitrary per-call labels/metadata (carried provider-side if supported).
 	Labels map[string]string
 }
