@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // TestToolCalling_WithConfigurableMaxRounds tests that MaxToolRounds is respected
@@ -184,7 +185,16 @@ func TestBuildPlans_WithToolConfiguration(t *testing.T) {
 		StopOnToolError: &stopOnError,
 	}
 
-	plans, err := buildPlans(ProviderGoogle, "gemini-test", req)
+	cfg := CoraConfig{
+		ToolCacheTTL:     5 * time.Minute,
+		ToolCacheMaxSize: 100,
+		ToolRetryConfig: &RetryConfig{
+			MaxAttempts:    3,
+			InitialBackoff: 100 * time.Millisecond,
+		},
+	}
+
+	plans, err := buildPlans(ProviderGoogle, "gemini-test", req, cfg)
 	if err != nil {
 		t.Fatalf("buildPlans error: %v", err)
 	}
@@ -202,6 +212,17 @@ func TestBuildPlans_WithToolConfiguration(t *testing.T) {
 	}
 	if plan.StopOnToolError == nil || *plan.StopOnToolError != false {
 		t.Errorf("expected StopOnToolError to be false, got %v", plan.StopOnToolError)
+	}
+
+	// Verify client-level config is passed through
+	if plan.ToolCacheTTL != 5*time.Minute {
+		t.Errorf("expected ToolCacheTTL to be 5m, got %v", plan.ToolCacheTTL)
+	}
+	if plan.ToolCacheMaxSize != 100 {
+		t.Errorf("expected ToolCacheMaxSize to be 100, got %d", plan.ToolCacheMaxSize)
+	}
+	if plan.ToolRetryConfig == nil || plan.ToolRetryConfig.MaxAttempts != 3 {
+		t.Errorf("expected ToolRetryConfig with MaxAttempts=3, got %v", plan.ToolRetryConfig)
 	}
 }
 

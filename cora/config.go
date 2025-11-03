@@ -35,6 +35,11 @@ type CoraConfig struct {
 	HTTPClient *http.Client
 	Timeout    time.Duration // applied to HTTPOptions.Timeout (genai) and HTTP client (OpenAI) when possible
 
+	// Tool execution configuration (applies to all tool calls unless overridden per-request).
+	ToolCacheTTL     time.Duration // TTL for cached tool results; 0 disables cache (default: 0)
+	ToolCacheMaxSize int           // Max number of cached tool results; 0 disables cache (default: 0)
+	ToolRetryConfig  *RetryConfig  // Retry configuration for tool handlers; nil disables retry (default: nil)
+
 	// Auto-detection.
 	DetectEnv bool // when true, pull missing values from environment
 }

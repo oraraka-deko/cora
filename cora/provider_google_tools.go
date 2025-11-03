@@ -31,6 +31,16 @@ func (p *googleProvider) executeToolLoop(ctx context.Context, model string, cont
 		WithStopOnError(stopOnError).
 		WithValidator(plan.Tools)
 
+	// Apply cache if configured
+	if plan.ToolCacheTTL > 0 && plan.ToolCacheMaxSize > 0 {
+		executor = executor.WithCache(plan.ToolCacheTTL, plan.ToolCacheMaxSize)
+	}
+
+	// Apply retry if configured
+	if plan.ToolRetryConfig != nil {
+		executor = executor.WithRetry(*plan.ToolRetryConfig)
+	}
+
 	roundCount := 0
 
 	// Convert initial contents to proper type
