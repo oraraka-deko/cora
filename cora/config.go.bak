@@ -1,0 +1,24 @@
+package cora
+
+import "net/http"
+
+// CoraConfig contains client-wide configuration.
+// In this step we require explicit provider selection at call-time (TextRequest.Provider).
+// Config holds secrets and HTTP knobs.
+type CoraConfig struct {
+	// OpenAI
+	OpenAIKey    string
+	OpenAIBaseURL string // optional, supports Azure or custom gateways
+	OpenAIOrgID   string // optional
+
+	// Google (Gemini API Developer key; Vertex/ADC can be added later)
+	GoogleAPIKey string
+	GoogleBaseURL string // optional
+
+	// Shared HTTP client (optional).
+	HTTPClient *http.Client
+
+	// Default model per provider if not set per-call.
+	DefaultModelOpenAI string
+	DefaultModelGoogle string
+}

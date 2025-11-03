@@ -1,0 +1,201 @@
+package cora
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	openai "github.com/sashabaranov/go-openai"
+	"github.com/sashabaranov/go-openai/jsonschema"
+)
+
+type openAIProvider struct {
+	client *openai.Client
+}
+
+func newOpenAIProvider(cfg CoraConfig) (providerClient, error) {
+	if cfg.OpenAIAPIKey == "" {
+		return nil, errors.New("cora: OpenAI key is required to use ProviderOpenAI")
+	}
+	oc := openai.DefaultConfig(cfg.OpenAIAPIKey)
+	if cfg.OpenAIBaseURL != "" {
+		oc.BaseURL = cfg.OpenAIBaseURL
+	}
+	if cfg.OpenAIOrgID != "" {
+		oc.OrgID = cfg.OpenAIOrgID
+	}
+	if cfg.HTTPClient != nil {
+		oc.HTTPClient = cfg.HTTPClient
+	}
+	return &openAIProvider{client: openai.NewClientWithConfig(oc)}, nil
+}
+
+func (p *openAIProvider) Text(ctx context.Context, plan callPlan) (callResult, error) {
+	if plan.Proofread {
+		return p.proofread(ctx, plan)
+	}
+
+	msgs := make([]openai.ChatCompletionMessage, 0, 4)
+	if strings.TrimSpace(plan.System) != "" {
+		msgs = append(msgs, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleSystem,
+			Content: plan.System,
+		})
+	}
+	msgs = append(msgs, openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleUser,
+		Content: plan.Input,
+	})
+
+	req := openai.ChatCompletionRequest{
+		Model:    plan.Model,
+		Messages: msgs,
+	}
+	if plan.Temperature != nil {
+		req.Temperature = *plan.Temperature
+	}
+	if plan.MaxOutputTokens != nil {
+		req.MaxCompletionTokens = *plan.MaxOutputTokens
+	}
+
+	// Structured JSON
+	if plan.Structured && len(plan.ResponseSchema) > 0 {
+		req.ResponseFormat = &openai.ChatCompletionResponseFormat{
+			Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
+			JSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
+				Name:   "cora_response",
+				Schema: rawJSONSchema{m: plan.ResponseSchema},
+				Strict: true,
+			},
+		}
+	}
+
+	// Tool calling
+	if len(plan.Tools) > 0 {
+		req.Tools = make([]openai.Tool, 0, len(plan.Tools))
+		for _, t := range plan.Tools {
+			req.Tools = append(req.Tools, openai.Tool{
+				Type: openai.ToolTypeFunction,
+				Function: &openai.FunctionDefinition{
+					Name:        t.Name,
+					Description: t.Description,
+					Parameters:  toOpenAIJSONSchema(t.ParametersSchema),
+				},
+			})
+		}
+		// ToolChoice left to provider defaults (auto).
+	}
+
+	// First round
+	resp, err := p.client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return callResult{}, err
+	}
+	cr := p.toCallResult(resp)
+
+	// Tool loop (single follow-up round for simplicity)
+	if len(resp.Choices) > 0 && len(resp.Choices[0].Message.ToolCalls) > 0 && len(plan.ToolHandlers) > 0 {
+		toolMsgs, err := p.invokeTools(ctx, resp.Choices[0].Message.ToolCalls, plan.ToolHandlers)
+		if err != nil {
+			return callResult{}, err
+		}
+		req.Messages = append(req.Messages, resp.Choices[0].Message) // include tool call message
+		req.Messages = append(req.Messages, toolMsgs...)
+		resp2, err := p.client.CreateChatCompletion(ctx, req)
+		if err != nil {
+			return callResult{}, err
+		}
+		cr = p.toCallResult(resp2)
+		cr.toolLoop = true
+	}
+	return cr, nil
+}
+
+func (p *openAIProvider) toCallResult(resp openai.ChatCompletionResponse) callResult {
+	res := callResult{}
+	if len(resp.Choices) > 0 {
+		res.Text = resp.Choices[0].Message.Content
+		// If response format was JSON schema, try parsing it.
+		var m map[string]any
+		if json.Unmarshal([]byte(res.Text), &m) == nil {
+			res.JSON = m
+		}
+	}
+	// Usage
+	if resp.Usage.TotalTokens > 0 {
+		pt := resp.Usage.PromptTokens
+		ct := resp.Usage.CompletionTokens
+		tt := resp.Usage.TotalTokens
+		res.PromptTokens = &pt
+		res.CompletionTokens = &ct
+		res.TotalTokens = &tt
+	}
+	return res
+}
+
+func (p *openAIProvider) proofread(ctx context.Context, plan callPlan) (callResult, error) {
+	sys := "You are a writing assistant. Rewrite the user's input to correct grammar, spelling, and clarity without changing its meaning. Return only the rewritten text."
+	req := openai.ChatCompletionRequest{
+		Model: plan.Model,
+		Messages: []openai.ChatCompletionMessage{
+			{Role: openai.ChatMessageRoleSystem, Content: sys},
+			{Role: openai.ChatMessageRoleUser, Content: plan.Input},
+		},
+	}
+	// Lower randomness by default in proofreading.
+	if plan.Temperature != nil {
+		req.Temperature = *plan.Temperature
+	} else {
+		req.Temperature = 0.2
+	}
+	if plan.MaxOutputTokens != nil {
+		req.MaxCompletionTokens = *plan.MaxOutputTokens
+	}
+	resp, err := p.client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return callResult{}, err
+	}
+	return p.toCallResult(resp), nil
+}
+
+func (p *openAIProvider) invokeTools(ctx context.Context, calls []openai.ToolCall, handlers map[string]CoraToolHandler) ([]openai.ChatCompletionMessage, error) {
+	out := make([]openai.ChatCompletionMessage, 0, len(calls))
+	for _, tc := range calls {
+		fn := tc.Function.Name
+		h, ok := handlers[fn]
+		if !ok {
+			return nil, fmt.Errorf("cora: no handler for tool %q", fn)
+		}
+		var args map[string]any
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			return nil, fmt.Errorf("cora: parsing tool args for %q: %w", fn, err)
+		}
+		result, err := h(ctx, args)
+		if err != nil {
+			return nil, fmt.Errorf("cora: tool %q failed: %w", fn, err)
+		}
+		blob, err := json.Marshal(result)
+		if err != nil {
+			return nil, fmt.Errorf("cora: tool %q result not JSON-serializable: %w", fn, err)
+		}
+		out = append(out, openai.ChatCompletionMessage{
+			Role:       openai.ChatMessageRoleTool,
+			Name:       fn,
+			ToolCallID: tc.ID,
+			Content:    string(blob),
+		})
+	}
+	return out, nil
+}
+
+func toOpenAIJSONSchema(m map[string]any) any {
+	// If user constructed a jsonschema.Definition, pass through.
+	if m == nil {
+		return jsonschema.Definition{Type: jsonschema.Object}
+	}
+	// Best-effort: try to coerce common fields into jsonschema.Definition.
+	// For now, pass raw marshaler to satisfy interface; OpenAI SDK accepts arbitrary structs too.
+	return m
+}

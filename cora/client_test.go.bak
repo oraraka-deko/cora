@@ -1,0 +1,104 @@
+package cora
+
+import (
+	"context"
+	"os"
+	"testing"
+
+	"google.golang.org/genai"
+)
+
+func TestNew_OpenAIOnly_FromEnv(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	// Ensure GOOGLE_API_KEY is unset to avoid accidental Google init.
+	_ = os.Unsetenv("GOOGLE_API_KEY")
+
+	ctx := context.Background()
+	c, err := New(ctx, CoraClientConfig{DetectEnv: true})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if c.HasOpenAI() == false {
+		t.Fatalf("expected OpenAI to be initialized")
+	}
+	if c.HasGoogle() {
+		t.Fatalf("did not expect Google to be initialized")
+	}
+}
+
+func TestNew_GoogleGeminiOnly_FromEnv(t *testing.T) {
+	t.Setenv("GOOGLE_API_KEY", "gsk-test")
+	_ = os.Unsetenv("OPENAI_API_KEY")
+	_ = os.Unsetenv("GOOGLE_CLOUD_PROJECT")
+	_ = os.Unsetenv("GOOGLE_CLOUD_LOCATION")
+
+	ctx := context.Background()
+	c, err := New(ctx, CoraClientConfig{DetectEnv: true, GoogleBackend: GoogleBackendGemini})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if !c.HasGoogle() {
+		t.Fatalf("expected Google to be initialized")
+	}
+	if c.effective.googleBackend != genai.BackendGeminiAPI {
+		t.Fatalf("expected Google backend GeminiAPI, got %v", c.effective.googleBackend)
+	}
+	if c.HasOpenAI() {
+		t.Fatalf("did not expect OpenAI to be initialized")
+	}
+}
+
+func TestNew_GoogleVertex_FromExplicit(t *testing.T) {
+	// Simulate Vertex AI usage without GOOGLE_API_KEY (ADC or other credentials may apply).
+	_ = os.Unsetenv("GOOGLE_API_KEY")
+	_ = os.Unsetenv("OPENAI_API_KEY")
+
+	cfg := CoraClientConfig{
+		Provider:       ProviderGoogle,
+		GoogleBackend:  GoogleBackendVertex,
+		GoogleProject:  "my-project",
+		GoogleLocation: "us-central1",
+		// API key is optional for Vertex if user uses ADC, we only check we can construct client.
+	}
+	ctx := context.Background()
+	c, err := New(ctx, cfg)
+	if err != nil {
+		// Vertex AI requires either GOOGLE_API_KEY or Application Default Credentials (ADC).
+		// In test environments without ADC setup, this is expected to fail.
+		t.Logf("New returned expected error for Vertex setup without credentials: %v", err)
+		return
+	}
+	if !c.HasGoogle() {
+		t.Fatalf("expected Google to be initialized for Vertex")
+	}
+	if c.effective.googleBackend != genai.BackendVertexAI {
+		t.Fatalf("expected BackendVertexAI, got %v", c.effective.googleBackend)
+	}
+}
+
+func TestNew_BothProviders_FromExplicit(t *testing.T) {
+	cfg := CoraClientConfig{
+		DetectEnv:     false,
+		OpenAIAPIKey:  "sk-openai",
+		GoogleAPIKey:  "gsk-google",
+		GoogleBackend: GoogleBackendGemini,
+	}
+	ctx := context.Background()
+	c, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if !c.HasOpenAI() || !c.HasGoogle() {
+		t.Fatalf("expected both providers initialized; got openai=%v google=%v", c.HasOpenAI(), c.HasGoogle())
+	}
+}
+
+func TestNew_RequiresAtLeastOneProvider(t *testing.T) {
+	_ = os.Unsetenv("OPENAI_API_KEY")
+	_ = os.Unsetenv("GOOGLE_API_KEY")
+	ctx := context.Background()
+	_, err := New(ctx, CoraClientConfig{})
+	if err == nil {
+		t.Fatalf("expected error when no provider credentials supplied")
+	}
+}

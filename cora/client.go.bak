@@ -1,0 +1,300 @@
+package cora
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	openai "github.com/sashabaranov/go-openai"
+	"google.golang.org/genai"
+)
+
+// GoogleBackend selects the underlying Google backend.
+type GoogleBackend int
+
+const (
+	// GoogleBackendAuto chooses based on presence of Project/Location (Vertex) or not (Gemini API).
+	GoogleBackendAuto GoogleBackend = iota
+	// GoogleBackendGemini uses Gemini Developer API.
+	GoogleBackendGemini
+	// GoogleBackendVertex uses Vertex AI (requires Project and Location).
+	GoogleBackendVertex
+)
+
+// CoraClientConfig is the single, unified configuration for creating a Cora client.
+type CoraClientConfig struct {
+	// Provider preference. If ProviderAuto, Cora infers from keys and env.
+	Provider Provider
+
+	// OpenAI configuration.
+	OpenAIAPIKey     string // falls back to env OPENAI_API_KEY if empty and DetectEnv is true
+	OpenAIBaseURL    string // optional; supports custom or Azure endpoint
+	OpenAIOrgID      string // optional; also supports env OPENAI_ORG_ID
+	OpenAIAPIType    string // "openai" (default) or "azure"
+	OpenAIAPIVersion string // required for Azure
+
+	// Google/GenAI configuration.
+	GoogleAPIKey   string // falls back to env GOOGLE_API_KEY if empty and DetectEnv is true
+	GoogleProject  string // required for Vertex AI
+	GoogleLocation string // required for Vertex AI
+	GoogleBaseURL  string // optional custom endpoint
+	GoogleBackend  GoogleBackend
+
+	// Shared client options.
+	HTTPClient *http.Client
+	Timeout    time.Duration // applied to HTTPOptions.Timeout (genai) and HTTP client (OpenAI) when possible
+
+	// Auto-detection.
+	DetectEnv bool // when true, pull missing values from environment
+}
+
+// Client is the unified Cora client. It may hold one or both underlying clients.
+type Client struct {
+	cfg    CoraClientConfig
+	google *genai.Client
+	openai *openai.Client
+
+	// snapshot of resolved/effective values (useful for diagnostics and tests).
+	effective struct {
+		useGoogle bool
+		useOpenAI bool
+
+		googleBackend genai.Backend
+		googleBaseURL string
+
+		openAIBaseURL string
+		openAIAPIType openai.APIType
+	}
+}
+
+// New constructs a Cora client by auto-configuring underlying providers (Google and/or OpenAI)
+// based on the provided config and, optionally, environment variables.
+func New(ctx context.Context, cfg CoraClientConfig) (*Client, error) {
+	resolveFromEnv(&cfg)
+
+	c := &Client{cfg: cfg}
+
+	// Decide which providers to initialize.
+	wantGoogle, wantOpenAI, gBackend := decideProviders(cfg)
+
+	// Initialize Google/genai client if requested and feasible.
+	if wantGoogle {
+		gc, eff, err := buildGoogleClient(ctx, cfg, gBackend)
+		if err != nil {
+			return nil, err
+		}
+		c.google = gc
+		c.effective.useGoogle = true
+		c.effective.googleBackend = eff.backend
+		c.effective.googleBaseURL = eff.baseURL
+	}
+
+	// Initialize OpenAI client if requested and feasible.
+	if wantOpenAI {
+		oc, eff, err := buildOpenAIClient(cfg)
+		if err != nil {
+			return nil, err
+		}
+		c.openai = oc
+		c.effective.useOpenAI = true
+		c.effective.openAIBaseURL = eff.baseURL
+		c.effective.openAIAPIType = eff.apiType
+	}
+
+	// If nothing got initialized, return a helpful error.
+	if !c.effective.useGoogle && !c.effective.useOpenAI {
+		return nil, errors.New("cora: no provider initialized; supply at least one API key or explicit provider config")
+	}
+
+	return c, nil
+}
+
+// HasGoogle reports whether the Google/genai provider is configured.
+func (c *Client) HasGoogle() bool { return c != nil && c.effective.useGoogle }
+
+// HasOpenAI reports whether the OpenAI provider is configured.
+func (c *Client) HasOpenAI() bool { return c != nil && c.effective.useOpenAI }
+
+// internal: env resolution
+func resolveFromEnv(cfg *CoraClientConfig) {
+	if !cfg.DetectEnv {
+		return
+	}
+	if cfg.OpenAIAPIKey == "" {
+		cfg.OpenAIAPIKey = os.Getenv("OPENAI_API_KEY")
+	}
+	if cfg.OpenAIOrgID == "" {
+		cfg.OpenAIOrgID = os.Getenv("OPENAI_ORG_ID")
+	}
+	// Azure hints (optional)
+	if cfg.OpenAIAPIType == "" {
+		// Accept a few common envs; if absent, default stays empty (treated as "openai").
+		if v := os.Getenv("OPENAI_API_TYPE"); v != "" {
+			cfg.OpenAIAPIType = v
+		}
+	}
+	if cfg.OpenAIAPIVersion == "" {
+		if v := os.Getenv("OPENAI_API_VERSION"); v != "" {
+			cfg.OpenAIAPIVersion = v
+		}
+	}
+	if cfg.OpenAIBaseURL == "" {
+		if v := os.Getenv("OPENAI_BASE_URL"); v != "" {
+			cfg.OpenAIBaseURL = v
+		}
+	}
+
+	if cfg.GoogleAPIKey == "" {
+		cfg.GoogleAPIKey = os.Getenv("GOOGLE_API_KEY")
+	}
+	// Common GCP envs that could help Vertex decision; not strictly required here.
+	if cfg.GoogleProject == "" {
+		if v := os.Getenv("GOOGLE_CLOUD_PROJECT"); v != "" {
+			cfg.GoogleProject = v
+		} else if v := os.Getenv("GCP_PROJECT"); v != "" {
+			cfg.GoogleProject = v
+		}
+	}
+	if cfg.GoogleLocation == "" {
+		// Frequently used env var in Vertex tutorials; not universal.
+		if v := os.Getenv("GOOGLE_CLOUD_LOCATION"); v != "" {
+			cfg.GoogleLocation = v
+		}
+	}
+	if cfg.GoogleBaseURL == "" {
+		if v := os.Getenv("GOOGLE_GENAI_BASE_URL"); v != "" {
+			cfg.GoogleBaseURL = v
+		}
+	}
+}
+
+// internal: provider decision
+func decideProviders(cfg CoraClientConfig) (wantGoogle, wantOpenAI bool, gBackend genai.Backend) {
+	// Choose Google backend
+	switch cfg.GoogleBackend {
+	case GoogleBackendGemini:
+		gBackend = genai.BackendGeminiAPI
+	case GoogleBackendVertex:
+		gBackend = genai.BackendVertexAI
+	default: // auto
+		if cfg.GoogleProject != "" && cfg.GoogleLocation != "" {
+			gBackend = genai.BackendVertexAI
+		} else {
+			gBackend = genai.BackendGeminiAPI
+		}
+	}
+
+	switch cfg.Provider {
+	case ProviderGoogle:
+		wantGoogle = true
+	case ProviderOpenAI:
+		wantOpenAI = true
+	default: // ProviderAuto (empty string)
+		// Initialize whatever we have credentials for.
+		if cfg.GoogleAPIKey != "" || gBackend == genai.BackendVertexAI {
+			// Vertex can also auth via ADC; we allow init if project/location present.
+			wantGoogle = true
+		}
+		if cfg.OpenAIAPIKey != "" {
+			wantOpenAI = true
+		}
+	}
+	return
+}
+
+// internal: google client builder
+type googleEffective struct {
+	baseURL string
+	backend genai.Backend
+}
+
+func buildGoogleClient(ctx context.Context, cfg CoraClientConfig, backend genai.Backend) (*genai.Client, googleEffective, error) {
+	var httpOpts *genai.HTTPOptions
+	if cfg.GoogleBaseURL != "" || cfg.Timeout > 0 {
+		httpOpts = &genai.HTTPOptions{}
+		if cfg.GoogleBaseURL != "" {
+			httpOpts.BaseURL = cfg.GoogleBaseURL
+		}
+		if cfg.Timeout > 0 {
+			t := cfg.Timeout
+			httpOpts.Timeout = &t
+		}
+	}
+
+	gcfg := &genai.ClientConfig{
+		APIKey:     cfg.GoogleAPIKey, // can be empty if using Vertex with ADC
+		Backend:    backend,
+		Project:    cfg.GoogleProject,
+		Location:   cfg.GoogleLocation,
+		HTTPClient: cfg.HTTPClient, // optional
+	}
+	if httpOpts != nil {
+		gcfg.HTTPOptions = *httpOpts
+	}
+
+	gc, err := genai.NewClient(ctx, gcfg)
+	if err != nil {
+		return nil, googleEffective{}, err
+	}
+	eff := googleEffective{
+		backend: backend,
+	}
+	if httpOpts != nil {
+		eff.baseURL = httpOpts.BaseURL
+	}
+	return gc, eff, nil
+}
+
+// internal: openai client builder
+type openAIEffective struct {
+	baseURL string
+	apiType openai.APIType
+}
+
+func buildOpenAIClient(cfg CoraClientConfig) (*openai.Client, openAIEffective, error) {
+	if cfg.OpenAIAPIKey == "" && !looksLikeAzure(cfg.OpenAIBaseURL) {
+		// Azure deployments sometimes use Azure auth; but standard OpenAI requires API key.
+		return nil, openAIEffective{}, errors.New("cora: OpenAI selected but no OPENAI_API_KEY provided")
+	}
+
+	apiType := openai.APITypeOpenAI
+	switch strings.ToLower(cfg.OpenAIAPIType) {
+	case "azure", "azuread":
+		apiType = openai.APITypeAzure
+	case "", "openai":
+		apiType = openai.APITypeOpenAI
+	default:
+		// Fallback to OpenAI type for unknown strings.
+		apiType = openai.APITypeOpenAI
+	}
+
+	ocfg := openai.DefaultConfig(cfg.OpenAIAPIKey)
+	ocfg.BaseURL = cfg.OpenAIBaseURL
+	ocfg.OrgID = cfg.OpenAIOrgID
+	ocfg.APIType = apiType
+	// APIVersion only matters for Azure/Anthropic types.
+	if cfg.OpenAIAPIVersion != "" {
+		ocfg.APIVersion = cfg.OpenAIAPIVersion
+	}
+	// Wire in shared HTTP client if provided.
+	if cfg.HTTPClient != nil {
+		ocfg.HTTPClient = cfg.HTTPClient
+	}
+	// Note: Timeout can be set on provided HTTPClient. If nil, user can wrap default with timeout externally.
+
+	client := openai.NewClientWithConfig(ocfg)
+	eff := openAIEffective{
+		baseURL: ocfg.BaseURL,
+		apiType: ocfg.APIType,
+	}
+	return client, eff, nil
+}
+
+// heuristic: determine if BaseURL looks like Azure OpenAI endpoint
+func looksLikeAzure(baseURL string) bool {
+	u := strings.ToLower(baseURL)
+	return strings.Contains(u, ".openai.azure.com") || strings.Contains(u, "azure.com/openai")
+}

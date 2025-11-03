@@ -1,0 +1,223 @@
+package cora
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+// fake provider used to isolate orchestration logic unit tests (no network).
+type fakeProvider struct {
+	lastPlan callPlan
+
+	// configurable canned responses
+	proofreadOut string
+	firstOut     string
+	finalOut     string
+
+	// simulate tool call round by returning an indicator in firstOut,
+	// then finalOut on the second round
+	supportsTools bool
+}
+
+func (f *fakeProvider) Text(ctx context.Context, plan callPlan) (callResult, error) {
+	f.lastPlan = plan
+
+	// Simulate slow operations budget
+	select {
+	case <-ctx.Done():
+		return callResult{}, ctx.Err()
+	case <-time.After(1 * time.Millisecond):
+	}
+
+	if plan.Proofread {
+		return callResult{Text: coalesce(f.proofreadOut, "[proofread]")}, nil
+	}
+
+	// Tool calling: first response "requests a tool", then final answer.
+	if f.supportsTools && len(plan.Tools) > 0 && len(plan.ToolHandlers) > 0 {
+		if f.firstOut != "" {
+			// First round with "tool call"
+			out := callResult{Text: f.firstOut}
+			// mutate to simulate tool loop consumption; next call returns final
+			f.firstOut = ""
+			return out, nil
+		}
+		return callResult{Text: coalesce(f.finalOut, "final after tool")}, nil
+	}
+
+	// Structured JSON: return a JSON blob string
+	if plan.Structured && len(plan.ResponseSchema) > 0 {
+		return callResult{Text: `{"ok":true,"items":[1,2,3]}`, JSON: map[string]any{"ok": true, "items": []any{1.0, 2.0, 3.0}}}, nil
+	}
+
+	return callResult{Text: coalesce(f.finalOut, "ok")}, nil
+}
+
+func coalesce(s string, def string) string {
+	if s != "" {
+		return s
+	}
+	return def
+}
+
+func TestText_Basic_Mode(t *testing.T) {
+	c := &Client{cfg: CoraClientConfig{}}
+	c.openai = &fakeProvider{finalOut: "hello world"}
+
+	resp, err := c.Text(context.Background(), TextRequest{
+		Provider: ProviderOpenAI,
+		Model:    "gpt-test",
+		Input:    "Say hi",
+		Mode:     ModeBasic,
+	})
+	if err != nil {
+		t.Fatalf("Text error: %v", err)
+	}
+	if resp.Text != "hello world" {
+		t.Fatalf("unexpected text: %q", resp.Text)
+	}
+}
+
+func TestText_StructuredJSON_Mode(t *testing.T) {
+	c := &Client{cfg: CoraClientConfig{}}
+	c.openai = &fakeProvider{}
+
+	resp, err := c.Text(context.Background(), TextRequest{
+		Provider:       ProviderOpenAI,
+		Model:          "gpt-test",
+		Input:          "Return JSON",
+		Mode:           ModeStructuredJSON,
+		ResponseSchema: map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatalf("Text error: %v", err)
+	}
+	if resp.JSON == nil || resp.JSON["ok"] != true {
+		t.Fatalf("expected structured JSON response")
+	}
+}
+
+func TestText_TwoStepEnhance_Mode(t *testing.T) {
+	fp := &fakeProvider{proofreadOut: "Improved input", finalOut: "Final answer"}
+	c := &Client{cfg: CoraClientConfig{}}
+	c.openai = fp
+
+	resp, err := c.Text(context.Background(), TextRequest{
+		Provider: ProviderOpenAI,
+		Model:    "gpt-test",
+		Input:    "raw text with errrs",
+		Mode:     ModeTwoStepEnhance,
+	})
+	if err != nil {
+		t.Fatalf("Text error: %v", err)
+	}
+	if resp.Text != "Final answer" {
+		t.Fatalf("unexpected final text: %q", resp.Text)
+	}
+	// Ensure the second plan received the improved input.
+	if fp.lastPlan.Input != "Improved input" {
+		t.Fatalf("expected improved input to feed second step, got %q", fp.lastPlan.Input)
+	}
+}
+
+func TestText_ToolCalling_Mode(t *testing.T) {
+	fp := &fakeProvider{
+		supportsTools: true,
+		firstOut:      "tool requested", // first round (model requests tool)
+		finalOut:      "answer after tool",
+	}
+	c := &Client{cfg: CoraClientConfig{}}
+	c.openai = fp
+
+	resp, err := c.Text(context.Background(), TextRequest{
+		Provider: ProviderOpenAI,
+		Model:    "gpt-test",
+		Input:    "What's the weather?",
+		Mode:     ModeToolCalling,
+		Tools: []CoraTool{
+			{Name: "get_weather", Description: "Get weather", ParametersSchema: map[string]any{"type": "object"}},
+		},
+		ToolHandlers: map[string]CoraToolHandler{
+			"get_weather": func(ctx context.Context, args map[string]any) (any, error) { return map[string]any{"temp": 25}, nil },
+		},
+	})
+	if err != nil {
+		t.Fatalf("Text error: %v", err)
+	}
+	if resp.Text != "answer after tool" {
+		t.Fatalf("unexpected final text: %q", resp.Text)
+	}
+}
+
+func TestBuildPlans_Errors(t *testing.T) {
+	_, err := buildPlans(ProviderOpenAI, "gpt", TextRequest{Mode: ModeStructuredJSON})
+	if err == nil {
+		t.Fatal("expected error for missing ResponseSchema")
+	}
+	_, err = buildPlans(ProviderOpenAI, "gpt", TextRequest{Mode: ModeToolCalling})
+	if err == nil {
+		t.Fatal("expected error for missing Tools")
+	}
+}
+
+func TestClient_ModelRequired(t *testing.T) {
+	c, err := New(context.Background(), CoraClientConfig{})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	_, err = c.Text(context.Background(), TextRequest{
+		Provider: ProviderOpenAI,
+		Input:    "hi",
+		Mode:     ModeBasic,
+	})
+	if err == nil {
+		t.Fatal("expected error when model is missing and no default configured")
+	}
+}
+
+func TestEnsureProvider_Unsupported(t *testing.T) {
+	c := &Client{}
+	_, err := c.ensureProvider("unknown")
+	if err == nil {
+		t.Fatal("expected error for unknown provider")
+	}
+}
+
+func TestProviderCreation_FailWithoutKeys(t *testing.T) {
+	c, err := New(context.Background(), CoraClientConfig{}) // no keys
+	if err != nil {
+		t.Logf("New failed as expected: %v", err)
+		return
+	}
+
+	// Force real provider creation path; it should error due to missing keys.
+	_, err = c.Text(context.Background(), TextRequest{
+		Provider: ProviderOpenAI,
+		Model:    "gpt-test",
+		Input:    "hi",
+		Mode:     ModeBasic,
+	})
+	if err == nil {
+		t.Fatal("expected error due to missing OpenAI key")
+	}
+}
+
+func TestFakeProvider_ContextCancel(t *testing.T) {
+	fp := &fakeProvider{}
+	c := &Client{cfg: CoraClientConfig{}}
+	c.openai = fp
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := c.Text(ctx, TextRequest{
+		Provider: ProviderOpenAI,
+		Model:    "gpt",
+		Input:    "hi",
+		Mode:     ModeBasic,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
+	}
+}
